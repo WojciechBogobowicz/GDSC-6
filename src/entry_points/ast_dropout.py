@@ -25,6 +25,8 @@ from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
 from preprocessing import preprocess_audio_arrays
 
+BACKBONE_DIM = 128
+DROPOUT_PROB = 0.2
 
 class FocalLossTrainer(transformers.Trainer):
     def __init__(self, *args, **kwargs) -> None:
@@ -122,6 +124,21 @@ class ShiftAug:
             augmented_data[shift:] = 0
         data['audio']['array'] = augmented_data
         return data
+
+class AstDropout(torch.nn.Module):
+    def __init__(self, ast_model: torch.nn.Module, ast_output_dim, output_dim, dropout_prob=0.5):
+        super().__init__()
+        self.ast_model = ast_model
+        self.dropout = torch.nn.Dropout(dropout_prob)
+        self.linear = torch.nn.Linear(in_features=ast_output_dim, out_features=output_dim)
+
+    def forward(self, x):
+        logger.info(f"Fprward arg type: {type(x)}")
+        logger.info(f'Forward arg: {x}')
+        ret = self.ast_model(x)
+        ret = self.dropout(ret)
+        ret = self.linear(ret)
+        return ret
 
 
 def get_feature_extractor(model_name: str,
@@ -314,7 +331,8 @@ if __name__ == "__main__":
 #         logger.info("Model loaded")
 
     # Download model from model hub
-    model = transformers.ASTForAudioClassification.from_pretrained(args.model_name, num_labels=num_labels, label2id=label2id, id2label=id2label, ignore_mismatched_sizes=True)
+    ast_model = transformers.ASTForAudioClassification.from_pretrained(args.model_name, num_labels=BACKBONE_DIM, ignore_mismatched_sizes=True)
+    model = AstDropout(ast_model, BACKBONE_DIM, num_labels, DROPOUT_PROB)
 
     # Define training arguments for the purpose of training
     training_args = transformers.TrainingArguments(
