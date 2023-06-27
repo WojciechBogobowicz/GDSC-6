@@ -9,25 +9,19 @@ import json  # to open the json file with labels
 import logging  # module for displaying relevant information in the logs
 import os  # to manage environmental variables
 import sys  # to access to some variables used or maintained by the interpreter
+from copy import deepcopy
 from typing import Optional  # for type hints
 
 import pandas as pd  # home of the DataFrame construct, _the_ most important object for Data Science
-# from transformers import (                                        # required classes to perform the model training and implement early stopping
-#     ASTFeatureExtractor,
-#     ASTForAudioClassification,
-#     Trainer,
-#     TrainingArguments,
-#     EarlyStoppingCallback
-# )
 import torch  # library to work with PyTorch tensors and to figure out if we have a GPU available
 import transformers
 from datasets import (  # required tools to create, load and process our audio dataset
     Audio, Dataset, load_dataset)
 
+sys.path.append('..')
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
-from preprocessing import \
-    preprocess_audio_arrays  # functions to preprocess the dataset with ASTFeatureExtractor
+from preprocessing import preprocess_audio_arrays
 
 
 def get_feature_extractor(model_name: str,
@@ -113,6 +107,19 @@ def preprocess_data_for_training(
     logger.info(f" done extracting features for {dataset_name} dataset")
 
     return dataset_encoded
+
+class CustomCallback(transformers.TrainerCallback):
+
+    def __init__(self, trainer) -> None:
+        super().__init__()
+        self._trainer = trainer
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if control.should_evaluate:
+            control_copy = deepcopy(control)
+            self._trainer.evaluate(eval_dataset=self._trainer.train_dataset, metric_key_prefix="train")
+            return control_copy
+
 
 if __name__ == "__main__":
 
@@ -244,6 +251,7 @@ if __name__ == "__main__":
         tokenizer=feature_extractor,                                                 # passing the feature extractor
         callbacks = [early_stopping_callback]                                        # adding early stopping to avoid overfitting
     )
+    trainer.add_callback(CustomCallback(trainer))
 
     # Train the model
     logger.info(f" starting training proccess for {args.epochs} epoch(s)")
