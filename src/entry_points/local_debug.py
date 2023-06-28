@@ -33,7 +33,7 @@ DROPOUT_PROB = 0.5
 class AstDropout(torch.nn.Module):
     def __init__(
             self,
-            ast_model: torch.nn.Module,
+            backbone: torch.nn.Module,
             ast_output_dim,
             output_dim,
             label2id: dict,
@@ -43,7 +43,7 @@ class AstDropout(torch.nn.Module):
             **kwargs
         ):
         super().__init__(*args, **kwargs)
-        self.ast_model = ast_model
+        self.backbone = backbone
         self.dense = torch.nn.Sequential(
             torch.nn.ReLU(),
             torch.nn.Dropout(dropout_prob),
@@ -61,7 +61,7 @@ class AstDropout(torch.nn.Module):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,):
-        ret = self.ast_model.forward(
+        ret = self.backbone.forward(
             input_values,
             head_mask,
             labels,
@@ -273,8 +273,7 @@ def preprocess_data_for_training(
 
     return dataset_encoded
 
-class CustomCallback(transformers.TrainerCallback):
-
+class TrainMetricsTrackerCallback(transformers.TrainerCallback):
     def __init__(self, trainer) -> None:
         super().__init__()
         self._trainer = trainer
@@ -436,7 +435,7 @@ if __name__ == "__main__":
         tokenizer=feature_extractor,                                                 # passing the feature extractor
         callbacks = [early_stopping_callback]                                        # adding early stopping to avoid overfitting
     )
-    trainer.add_callback(CustomCallback(trainer))
+    trainer.add_callback(TrainMetricsTrackerCallback(trainer))
 
     # Train the model
     logger.info(f" starting training proccess for {args.epochs} epoch(s)")
