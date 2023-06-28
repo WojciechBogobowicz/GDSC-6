@@ -8,10 +8,13 @@ import datetime
 import json  # to open the json file with labels
 import logging  # module for displaying relevant information in the logs
 import os  # to manage environmental variables
+import pathlib
+import random
 import sys  # to access to some variables used or maintained by the interpreter
 from copy import deepcopy
 from typing import Optional  # for type hints
 
+import numpy as np
 import pandas as pd  # home of the DataFrame construct, _the_ most important object for Data Science
 import torch  # library to work with PyTorch tensors and to figure out if we have a GPU available
 import transformers
@@ -22,6 +25,116 @@ sys.path.append('..')
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
 from preprocessing import preprocess_audio_arrays
+
+
+class FocalLossTrainer(transformers.Trainer):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.loss_fn = FocalLoss(alpha=1, gamma=.5)
+        self.num_classes = 66
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels")
+        one_hoted_labels = torch.nn.functional.one_hot(labels, num_classes=self.num_classes).float()
+        outputs = model(**inputs) ## currently translate to input_values=inputs["input_values"]
+
+        logits = outputs.logits
+        loss = self.loss_fn(logits, one_hoted_labels)
+        return (loss, outputs) if return_outputs else loss
+
+
+
+class FocalLoss(torch.nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        # Compute the binary cross-entropy loss
+        bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        # Compute the modulating factor
+        modulating_factor = torch.exp(-self.gamma * targets * inputs.sigmoid() - self.gamma * (1 - targets) * (1 - inputs.sigmoid()))
+        # Compute the focal loss
+        focal_loss = self.alpha * (1 - inputs.sigmoid()).pow(self.gamma) * bce_loss * modulating_factor
+        return focal_loss.mean()
+
+
+class AugmentedDataset(Dataset):
+    def __init__(self, *args, augs=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.augs = [] if augs is None else augs
+
+    @classmethod
+    def from_dataset(cls, other, augs=None):
+        aug = cls(other.data, augs=augs, info=other.info)
+        return aug
+
+    def __getitem__(self, index):
+        item = super().__getitem__(index)
+        aug = item
+        for augmentation in self.augs:
+            aug = augmentation(aug)
+        return aug
+
+class NoiseAug:
+    def __init__(self, p, noise_ratio=0.01):
+        self.noise_ratio = noise_ratio
+        self.proba = p
+
+    def __call__(self, data):
+        if random.random() > self.proba:
+            return data
+        array = data['audio']['array']
+        noise = np.random.randn(len(array))
+        augmented_array = array + noise * self.noise_ratio
+        augmented_array = augmented_array.astype(type(array[0]))
+        data['audio']['array'] = augmented_array
+        return data
+
+
+class ShiftAug:
+    def __init__(self, p: float, len_percent: int, direction: str):
+        self.proba = p
+        self.percent = len_percent
+        self.direction = direction
+        assert 0.0 < self.percent < 1.0, 'Audio len percentage should be between 0.0 and 1.0.'
+        assert 0.0 <= self.proba <= 1.0, 'Augmentation probability should be between 0.0 and 1.0.'
+        assert self.direction in ['right', 'left', 'both'], 'Shift direction should have one of those values: \'right\', \'left\', \'both\'.'
+
+    def __call__(self, data):
+        if  random.random() > self.proba:
+            return data
+        array = data['audio']['array']
+        max_shift = int(len(array) * self.percent)
+        shift = random.randint(0, max_shift)
+
+        if self.direction == 'left':
+            shift = -shift
+        elif self.direction == 'both':
+            direction = np.random.randint(0, 2)
+            if direction == 1:
+                shift = -shift
+        augmented_data = np.roll(array, shift)
+        if shift > 0:
+            augmented_data[:shift] = 0
+        else:
+            augmented_data[shift:] = 0
+        data['audio']['array'] = augmented_data
+        return data
+
+def get_best_checkpoint_path(local_path: str):
+    save_dir = pathlib.Path(local_path)
+    ckpt_dirs = list(map(str, save_dir.glob("checkpoint*")))
+    ckpt_dirs = sorted(ckpt_dirs, key=lambda x: int(x.split('-')[-1]))
+    last_ckpt = ckpt_dirs[-1]
+    last_ckpt
+    state = transformers.TrainerState.load_from_json(last_ckpt + "/trainer_state.json")
+
+    best_checkopot_num = state.best_model_checkpoint.split("-")[-1]
+    best_checkopot_num
+    best_ckpt = last_ckpt.rstrip("1234567890") + best_checkopot_num
+    return best_ckpt
 
 
 def get_feature_extractor(model_name: str,
@@ -41,10 +154,8 @@ def get_feature_extractor(model_name: str,
 
     """
     if all((train_dataset_mean, train_dataset_std)):
-        feature_extractor = transformers.ASTFeatureExtractor.from_pretrained(
-            model_name, mean=train_dataset_mean, std=train_dataset_std)
-        logger.info(
-            f" feature extractor loaded with dataset mean: {train_dataset_mean} and standard deviation: {train_dataset_std}")
+        feature_extractor = transformers.ASTFeatureExtractor.from_pretrained(model_name, mean=train_dataset_mean, std=train_dataset_std)
+        logger.info(f" feature extractor loaded with dataset mean: {train_dataset_mean} and standard deviation: {train_dataset_std}")
     else:
         feature_extractor = transformers.ASTFeatureExtractor.from_pretrained(model_name)
         logger.info(" at least one of the optional arguments (mean, std) is missing")
@@ -59,7 +170,8 @@ def preprocess_data_for_training(
     fe_batch_size: int,
     dataset_name: str,
     shuffle: bool = False,
-    extract_file_name: bool = True) -> Dataset:
+    extract_file_name: bool = True,
+    augmentations=None) -> Dataset:
     """
     Preprocesses audio data for training.
 
@@ -77,6 +189,8 @@ def preprocess_data_for_training(
 
     """
     dataset = load_dataset("audiofolder", data_dir=dataset_path).get('train') # loading the dataset
+    if augmentations:
+        dataset = AugmentedDataset.from_dataset(dataset, augs=augmentations)
 
     # perform shuffle if specified
     if shuffle:
@@ -180,6 +294,12 @@ if __name__ == "__main__":
         label2id[k] = str(v)
         id2label[str(v)] = k
 
+    augmentations = [
+        NoiseAug(0.5, noise_ratio=0.01),
+        ShiftAug(0.5, 0.10, 'both'),
+    ]
+
+
     num_labels = len(label2id)  # define number of labels
 
 
@@ -195,7 +315,8 @@ if __name__ == "__main__":
         fe_batch_size=args.fe_batch_size,
         dataset_name="train",
         shuffle=True,
-        extract_file_name=False
+        extract_file_name=False,
+        augmentations=augmentations,
     )
 
     val_dataset_encoded = preprocess_data_for_training(
@@ -244,7 +365,8 @@ if __name__ == "__main__":
         early_stopping_patience = args.patience)
 
     # Create Trainer instance
-    trainer = transformers.Trainer(
+    trainer = FocalLossTrainer(
+    # trainer = transformers.Trainer(
         model=model,                                                                 # passing our model
         args=training_args,                                                          # passing the above created arguments
         compute_metrics=compute_metrics,                                             # passing the compute_metrics function that we imported from gdsc_eval module

@@ -24,6 +24,39 @@ from gdsc_eval import (  # functions to create predictions and evaluate them
 from preprocessing import preprocess_audio_arrays
 
 
+class FocalLossTrainer(transformers.Trainer):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.loss_fn = FocalLoss(alpha=1, gamma=.25)
+        self.num_classes = 66
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels")
+        one_hoted_labels = torch.nn.functional.one_hot(labels, num_classes=self.num_classes).float()
+        outputs = model(**inputs) ## currently translate to input_values=inputs["input_values"]
+
+        logits = outputs.logits
+        loss = self.loss_fn(logits, one_hoted_labels)
+        return (loss, outputs) if return_outputs else loss
+
+
+
+class FocalLoss(torch.nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        # Compute the binary cross-entropy loss
+        bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        # Compute the modulating factor
+        modulating_factor = torch.exp(-self.gamma * targets * inputs.sigmoid() - self.gamma * (1 - targets) * (1 - inputs.sigmoid()))
+        # Compute the focal loss
+        focal_loss = self.alpha * (1 - inputs.sigmoid()).pow(self.gamma) * bce_loss * modulating_factor
+        return focal_loss.mean().detach()
+
+
 def get_feature_extractor(model_name: str,
                           train_dataset_mean: Optional[float] = None,
                           train_dataset_std: Optional[float] = None
@@ -139,20 +172,22 @@ if __name__ == "__main__":
     parser.add_argument("--train_batch_size", type=int, default=32)                        # training batch size
     parser.add_argument("--eval_batch_size", type=int, default=64)                         # evaluation batch size
     parser.add_argument("--patience", type=int, default=2)                                 # early stopping - how many epoch without improvement will stop the training
-    parser.add_argument("--data_channel", type=str, default=os.environ["SM_CHANNEL_DATA"]) # directory where input data from S3 is stored
     parser.add_argument("--train_dir", type=str, default="train")                          # folder name with training data
     parser.add_argument("--val_dir", type=str, default="val")                              # folder name with validation data
     parser.add_argument("--test_dir", type=str, default="test")                            # folder name with test data
-    parser.add_argument("--output_dir", type=str, default=os.environ['SM_MODEL_DIR'])      # output directory. This directory will be saved in the S3 bucket
+
+    parser.add_argument("--data_channel", type=str, default=os.environ.get("SM_CHANNEL_DATA", "local")) # directory where input data from S3 is stored
+    parser.add_argument("--output_dir", type=str, default=os.environ.get('SM_MODEL_DIR', "local"))      # output directory. This directory will be saved in the S3 bucket
 
 
     args, _ = parser.parse_known_args()                    # parsing arguments from the notebook
-
+    if args.data_channel == "local":
+        args.data_channel = "../../data"
+        args.output_dir = "../../models"
 
     train_path = f"{args.data_channel}/{args.train_dir}"   # directory of our training dataset on the instance
     val_path = f"{args.data_channel}/{args.val_dir}"       # directory of our validation dataset on the instance
     test_path = f"{args.data_channel}/{args.test_dir}"     # directory of our test dataset on the instance
-
 
     # Set up logging which allows to print information in logs
     logger = logging.getLogger(__name__)
@@ -203,14 +238,14 @@ if __name__ == "__main__":
         fe_batch_size=args.fe_batch_size,
         dataset_name="validation"
     )
-
-    test_dataset_encoded = preprocess_data_for_training(
-        dataset_path=test_path,
-        sampling_rate=args.sampling_rate,
-        feature_extractor=feature_extractor,
-        fe_batch_size=args.fe_batch_size,
-        dataset_name="test"
-        )
+    if args.data_channel != "../../data":
+        test_dataset_encoded = preprocess_data_for_training(
+            dataset_path=test_path,
+            sampling_rate=args.sampling_rate,
+            feature_extractor=feature_extractor,
+            fe_batch_size=args.fe_batch_size,
+            dataset_name="test"
+            )
 
     # Download model from model hub
     model = transformers.ASTForAudioClassification.from_pretrained(
@@ -242,7 +277,8 @@ if __name__ == "__main__":
         early_stopping_patience = args.patience)
 
     # Create Trainer instance
-    trainer = transformers.Trainer(
+    # trainer = transformers.Trainer(
+    trainer = FocalLossTrainer(
         model=model,                                                                 # passing our model
         args=training_args,                                                          # passing the above created arguments
         compute_metrics=compute_metrics,                                             # passing the compute_metrics function that we imported from gdsc_eval module
@@ -287,21 +323,22 @@ if __name__ == "__main__":
     logger.info(" predictions for the validation set done and saved")
     logger.info(" preparing predictions for test set.")
 
+    if args.data_channel != "../../data":
 
-    # Preparing predictions for test set and saving them in the output directory
-    test_dataset_encoded.set_format(type='torch', columns=['input_values'])
-    test_dataset_encoded = test_dataset_encoded.map(
-        lambda x: make_predictions(x['input_values'], model, device),
-        batched = True,
-        batch_size=args.eval_batch_size
-    )
+        # Preparing predictions for test set and saving them in the output directory
+        test_dataset_encoded.set_format(type='torch', columns=['input_values'])
+        test_dataset_encoded = test_dataset_encoded.map(
+            lambda x: make_predictions(x['input_values'], model, device),
+            batched = True,
+            batch_size=args.eval_batch_size
+        )
 
-    # Keeping only the important columns for the csv file
-    test_dataset_encoded = test_dataset_encoded.remove_columns(['input_values'])
-    test_dataset_encoded_df = test_dataset_encoded.to_pandas()
+        # Keeping only the important columns for the csv file
+        test_dataset_encoded = test_dataset_encoded.remove_columns(['input_values'])
+        test_dataset_encoded_df = test_dataset_encoded.to_pandas()
 
 
-    pred_test_save_path = os.path.join(args.output_dir, "prediction_test.csv")
-    test_dataset_encoded_df.to_csv(pred_test_save_path, index = False)  # saving the file with test predictions
+        pred_test_save_path = os.path.join(args.output_dir, "prediction_test.csv")
+        test_dataset_encoded_df.to_csv(pred_test_save_path, index = False)  # saving the file with test predictions
 
-    logger.info(" prepared predictions for test set and saved it to the output directory. Training job completed")
+        logger.info(" prepared predictions for test set and saved it to the output directory. Training job completed")
