@@ -26,11 +26,63 @@ from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
 from preprocessing import preprocess_audio_arrays
 
+BACKBONE_DIM = 128
+DROPOUT_PROB = 0.5
+
+
+class AstDropout(torch.nn.Module):
+    def __init__(
+            self,
+            ast_model: torch.nn.Module,
+            ast_output_dim,
+            output_dim,
+            label2id: dict,
+            id2label: dict,
+            dropout_prob=0.5,
+            *args,
+            **kwargs
+        ):
+        super().__init__(*args, **kwargs)
+        self.ast_model = ast_model
+        self.relu = torch.nn.ReLU()
+        self.dropout = torch.nn.Dropout(dropout_prob)
+        self.linear = torch.nn.Linear(in_features=ast_output_dim, out_features=output_dim)
+
+        self.num_labels = output_dim
+        self.label2id=label2id,
+        self.id2label=id2label,
+
+    def forward(
+        self,
+        input_values: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,):
+        ret = self.ast_model.forward(
+            input_values,
+            head_mask,
+            labels,
+            output_attentions,
+            output_hidden_states,
+            return_dict
+        )
+        ret["logits"] = self.relu(ret["logits"])
+        ret["logits"] = self.dropout(ret["logits"])
+        ret["logits"] = self.linear(ret["logits"])
+        # print("#"*100)
+        # print("beggining")
+        # print(list(self.parameters())[0].view(-1)[0:5])
+        # print("end")
+        # print(list(self.parameters())[-1].view(-1)[0:5])
+        return ret
+
 
 class FocalLossTrainer(transformers.Trainer):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.loss_fn = FocalLoss(alpha=1, gamma=.5)
+        self.loss_fn = FocalLoss(alpha=1, gamma=.25)
         self.num_classes = 66
 
     def compute_loss(self, model, inputs, return_outputs=False):
@@ -295,8 +347,8 @@ if __name__ == "__main__":
         id2label[str(v)] = k
 
     augmentations = [
-        NoiseAug(0.5, noise_ratio=0.01),
-        ShiftAug(0.5, 0.10, 'both'),
+        NoiseAug(0.3, noise_ratio=0.005),
+        ShiftAug(0.3, 0.06, 'both'),
     ]
 
 
@@ -336,12 +388,22 @@ if __name__ == "__main__":
             )
 
     # Download model from model hub
-    model = transformers.ASTForAudioClassification.from_pretrained(
+    backbone = transformers.ASTForAudioClassification.from_pretrained(
         args.model_name,
-        num_labels=num_labels,
+        # num_labels=num_labels,
+        num_labels=BACKBONE_DIM,
+        # label2id=label2id,
+        # id2label=id2label,
+        ignore_mismatched_sizes=True
+    )
+
+    model = AstDropout(
+        backbone,
+        BACKBONE_DIM,
+        num_labels,
         label2id=label2id,
         id2label=id2label,
-        ignore_mismatched_sizes=True
+        dropout_prob=DROPOUT_PROB,
     )
 
     # Define training arguments for the purpose of training
@@ -384,6 +446,9 @@ if __name__ == "__main__":
     # Prepare predictions on the validation set for the purpose of error analysis
     logger.info("training job done. Preparing predictions for validation set.")
 
+
+    # set evaluation mode (e.g. disable dropout)
+    model.eval()
     # use gpu for inference if available
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -412,7 +477,6 @@ if __name__ == "__main__":
     logger.info(" preparing predictions for test set.")
 
     if args.data_channel != "../../data":
-
         # Preparing predictions for test set and saving them in the output directory
         test_dataset_encoded.set_format(type='torch', columns=['input_values'])
         test_dataset_encoded = test_dataset_encoded.map(
