@@ -44,10 +44,11 @@ class AstDropout(torch.nn.Module):
         ):
         super().__init__(*args, **kwargs)
         self.ast_model = ast_model
-        self.relu = torch.nn.ReLU()
-        self.dropout = torch.nn.Dropout(dropout_prob)
-        self.linear = torch.nn.Linear(in_features=ast_output_dim, out_features=output_dim)
-
+        self.dense = torch.nn.Sequential(
+            torch.nn.ReLU(),
+            torch.nn.Dropout(dropout_prob),
+            torch.nn.Linear(in_features=ast_output_dim, out_features=output_dim),
+        )
         self.num_labels = output_dim
         self.label2id=label2id,
         self.id2label=id2label,
@@ -68,14 +69,12 @@ class AstDropout(torch.nn.Module):
             output_hidden_states,
             return_dict
         )
-        ret["logits"] = self.relu(ret["logits"])
-        ret["logits"] = self.dropout(ret["logits"])
-        ret["logits"] = self.linear(ret["logits"])
-        # print("#"*100)
-        # print("beggining")
-        # print(list(self.parameters())[0].view(-1)[0:5])
-        # print("end")
-        # print(list(self.parameters())[-1].view(-1)[0:5])
+        ret["logits"] = self.dense(ret["logits"])
+        print("#"*100)
+        print("beggining")
+        print(list(self.parameters())[0].view(-1)[0:5])
+        print("end")
+        print(list(self.parameters())[-1].view(-1)[0:5])
         return ret
 
 
