@@ -223,6 +223,15 @@ if __name__ == "__main__":
         ignore_mismatched_sizes=True
     )
 
+    # freeze first layers
+    # for i, module in list(enumerate(model.modules()))[:10]:
+    #     for param in module.parameters():
+    #         param.requires_grad_(False)
+    for name, params in list(model.named_parameters()):
+        if "encoder" in name:
+            params.requires_grad = False
+
+
     # Define training arguments for the purpose of training
     training_args = transformers.TrainingArguments(
         output_dir=args.output_dir,                          # directory for saving model checkpoints and logs
