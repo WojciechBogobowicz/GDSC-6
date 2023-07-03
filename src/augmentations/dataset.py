@@ -1,3 +1,4 @@
+import random
 from typing import Iterable, List, Optional
 
 from datasets import Dataset
@@ -17,7 +18,9 @@ class AugmentedDataset(Dataset):
 
     def __getitem__(self, index: int | slice | Iterable[int]):
         item = super().__getitem__(index)
+        random_index = int(random.random() * len(self))
+
         aug = item
         for augmentation in self.augs:
-            aug = augmentation(aug)
+            aug = augmentation(aug, linear_comb=super().__getitem__(random_index))
         return aug

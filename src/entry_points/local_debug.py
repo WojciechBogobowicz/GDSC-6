@@ -21,7 +21,7 @@ from datasets import (  # required tools to create, load and process our audio d
 sys.path.append('..')
 from augmentations.audio_aug import AudioAug, NoiseAug, ShiftAug
 from augmentations.dataset import AugmentedDataset
-from augmentations.spectrogram_aug import CutoutAug, SpectrogramAug
+from augmentations.spectrogram_aug import CutoutAug, MixupAug, SpectrogramAug
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
 from preprocessing import preprocess_audio_arrays
@@ -200,10 +200,11 @@ if __name__ == "__main__":
 
     # Use augmentations
     augmentations = [
-        # NoiseAug(0.5, noise_ratio=0.01),
-        # ShiftAug(0.25, len_percent=0.1, direction='left'),
-        # CutoutAug(0.5, freq_masking_percentage=0.15, time_masking_percentage=0.05),
-        CutoutAug(1.0)
+        NoiseAug(0.5, noise_ratio=0.01),
+        ShiftAug(0.25, len_percent=0.1, direction='left'),
+        CutoutAug(0.5, freq_masking_percentage=0.15, time_masking_percentage=0.05),
+        # CutoutAug(1.0),
+        # MixupAug(1.0)
     ]
 
     print('#' * 10, augmentations, '#' * 10)

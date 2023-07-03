@@ -10,11 +10,12 @@ class AudioAug(AstAug):
 
 
 class NoiseAug(AudioAug):
-    def __init__(self, p, noise_ratio=0.01):
+    def __init__(self, p: float, noise_ratio: float = 0.01):
         self.noise_ratio = noise_ratio
         self.proba = p
+        assert 0.0 <= self.proba <= 1.0, 'Augmentation probability should be between 0.0 and 1.0.'
 
-    def __call__(self, data):
+    def __call__(self, data, **kwargs):
         if random.random() > self.proba:
             return data
         array = data['audio']['array']
@@ -34,7 +35,7 @@ class ShiftAug(AudioAug):
         assert 0.0 <= self.proba <= 1.0, 'Augmentation probability should be between 0.0 and 1.0.'
         assert self.direction in ['right', 'left', 'both'], 'Shift direction should have one of those values: \'right\', \'left\', \'both\'.'
 
-    def __call__(self, data):
+    def __call__(self, data, **kwargs):
         if  random.random() > self.proba:
             return data
         array = data['audio']['array']
