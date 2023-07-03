@@ -220,7 +220,8 @@ if __name__ == "__main__":
         num_labels=num_labels,
         label2id=label2id,
         id2label=id2label,
-        ignore_mismatched_sizes=True
+        ignore_mismatched_sizes=True,
+        hidden_dropout_prob=0.15,
     )
 
     # Define training arguments for the purpose of training
