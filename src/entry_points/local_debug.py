@@ -19,6 +19,9 @@ from datasets import (  # required tools to create, load and process our audio d
     Audio, Dataset, load_dataset)
 
 sys.path.append('..')
+from augmentations.audio_aug import AudioAug, NoiseAug, ShiftAug
+from augmentations.dataset import AugmentedDataset
+from augmentations.spectrogram_aug import CutoutAug, SpectrogramAug
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
 from preprocessing import preprocess_audio_arrays
@@ -59,7 +62,8 @@ def preprocess_data_for_training(
     fe_batch_size: int,
     dataset_name: str,
     shuffle: bool = False,
-    extract_file_name: bool = True) -> Dataset:
+    extract_file_name: bool = True,
+    augmentations=None) -> Dataset:
     """
     Preprocesses audio data for training.
 
@@ -77,6 +81,9 @@ def preprocess_data_for_training(
 
     """
     dataset = load_dataset("audiofolder", data_dir=dataset_path).get('train') # loading the dataset
+    if augmentations:
+        audio_augs = [aug for aug in augmentations if isinstance(aug, AudioAug)]
+        dataset = AugmentedDataset.from_dataset(dataset, augs=audio_augs)
 
     # perform shuffle if specified
     if shuffle:
@@ -105,6 +112,10 @@ def preprocess_data_for_training(
     )
 
     logger.info(f" done extracting features for {dataset_name} dataset")
+
+    if augmentations:
+        spec_augs = [aug for aug in augmentations if isinstance(aug, SpectrogramAug)]
+        dataset_encoded = AugmentedDataset.from_dataset(dataset_encoded, augs=spec_augs)
 
     return dataset_encoded
 
@@ -187,6 +198,16 @@ if __name__ == "__main__":
     feature_extractor = get_feature_extractor(
         args.model_name, args.train_dataset_mean, args.train_dataset_std)
 
+    # Use augmentations
+    augmentations = [
+        # NoiseAug(0.5, noise_ratio=0.01),
+        # ShiftAug(0.25, len_percent=0.1, direction='left'),
+        # CutoutAug(0.5, freq_masking_percentage=0.15, time_masking_percentage=0.05),
+        CutoutAug(1.0)
+    ]
+
+    print('#' * 10, augmentations, '#' * 10)
+
     # creating train and validation datasets
     train_dataset_encoded = preprocess_data_for_training(
         dataset_path=train_path,
@@ -195,7 +216,8 @@ if __name__ == "__main__":
         fe_batch_size=args.fe_batch_size,
         dataset_name="train",
         shuffle=True,
-        extract_file_name=False
+        extract_file_name=False,
+        augmentations=augmentations
     )
 
     val_dataset_encoded = preprocess_data_for_training(
