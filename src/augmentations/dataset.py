@@ -24,3 +24,20 @@ class AugmentedDataset(Dataset):
         for augmentation in self.augs:
             aug = augmentation(aug, linear_comb=super().__getitem__(random_index))
         return aug
+
+
+def expand_dataset(dataset: Dataset, augmentations: List[AstAug], expand_labels=None, label_column='label', combine_aug=False) -> Dataset:
+    ret = Dataset(dataset.data, info=dataset.info)
+    if not expand_labels:
+        expand_labels = set(dataset[label_column])
+    for data in dataset:
+        if data[label_column] in expand_labels:
+            if combine_aug:
+                to_add = data.copy()
+                for augmentation in augmentations:
+                    to_add = augmentation(to_add)
+                ret.add_item(to_add)
+            else:
+                for augmentation in augmentations:
+                    ret.add_item(augmentation(data.copy()))
+    return ret

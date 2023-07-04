@@ -55,3 +55,16 @@ class ShiftAug(AudioAug):
             augmented_data[shift:] = 0
         data['audio']['array'] = augmented_data
         return data
+
+
+class DoubleAug(AudioAug):
+    def __init__(self, p: float):
+        self.proba = p
+        assert 0.0 <= self.proba <= 1.0, 'Augmentation probability should be between 0.0 and 1.0.'
+
+    def __call__(self, data, **kwargs):
+        if random.random() > self.proba:
+            return data
+        arr = data['audio']['array']
+        data['audio']['array'] = np.append(arr, arr)
+        return data

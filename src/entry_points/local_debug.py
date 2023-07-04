@@ -19,8 +19,8 @@ from datasets import (  # required tools to create, load and process our audio d
     Audio, Dataset, load_dataset)
 
 sys.path.append('..')
-from augmentations.audio_aug import AudioAug, NoiseAug, ShiftAug
-from augmentations.dataset import AugmentedDataset
+from augmentations.audio_aug import AudioAug, DoubleAug, NoiseAug, ShiftAug
+from augmentations.dataset import AugmentedDataset, expand_dataset
 from augmentations.spectrogram_aug import CutoutAug, MixupAug, SpectrogramAug
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
@@ -81,6 +81,8 @@ def preprocess_data_for_training(
 
     """
     dataset = load_dataset("audiofolder", data_dir=dataset_path).get('train') # loading the dataset
+    dataset = expand_dataset(dataset, augmentations=[NoiseAug(1.0), DoubleAug(1.0)], combine_aug=False,
+                             expand_labels=set([2, 3, 4, 6, 7, 14, 15, 16, 18, 20, 32, 35, 45, 49, 50, 51, 52, 53, 57, 58]))
     if augmentations:
         audio_augs = [aug for aug in augmentations if isinstance(aug, AudioAug)]
         dataset = AugmentedDataset.from_dataset(dataset, augs=audio_augs)
