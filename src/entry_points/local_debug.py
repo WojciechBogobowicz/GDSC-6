@@ -4,14 +4,16 @@ This is the train script.
 This script contains all steps required to train a Huggingface model.
 """
 import argparse  # to parse arguments from passed in the hyperparameters
+import collections
 import datetime
 import json  # to open the json file with labels
 import logging  # module for displaying relevant information in the logs
 import os  # to manage environmental variables
 import sys  # to access to some variables used or maintained by the interpreter
 from copy import deepcopy
-from typing import Optional  # for type hints
+from typing import List, Optional  # for type hints
 
+import numpy as np
 import pandas as pd  # home of the DataFrame construct, _the_ most important object for Data Science
 import torch  # library to work with PyTorch tensors and to figure out if we have a GPU available
 import transformers
@@ -19,9 +21,10 @@ from datasets import (  # required tools to create, load and process our audio d
     Audio, Dataset, load_dataset)
 
 sys.path.append('..')
-from augmentations.audio_aug import AudioAug, DoubleAug, NoiseAug, ShiftAug
-from augmentations.dataset import AugmentedDataset, expand_dataset
-from augmentations.spectrogram_aug import CutoutAug, MixupAug, SpectrogramAug
+import augmentations.ast_aug as ast_aug
+import augmentations.audio_aug as audio_aug
+import augmentations.dataset as aug_dataset
+import augmentations.spectrogram_aug as spec_aug
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
 from preprocessing import preprocess_audio_arrays
@@ -63,7 +66,8 @@ def preprocess_data_for_training(
     dataset_name: str,
     shuffle: bool = False,
     extract_file_name: bool = True,
-    augmentations=None) -> Dataset:
+    augmentations: Optional[List[ast_aug.AstAug]] = None,
+    expand_dataset: bool = False) -> Dataset:
     """
     Preprocesses audio data for training.
 
@@ -81,11 +85,18 @@ def preprocess_data_for_training(
 
     """
     dataset = load_dataset("audiofolder", data_dir=dataset_path).get('train') # loading the dataset
-    dataset = expand_dataset(dataset, augmentations=[NoiseAug(1.0), DoubleAug(1.0)], combine_aug=False,
-                             expand_labels=set([2, 3, 4, 6, 7, 14, 15, 16, 18, 20, 32, 35, 45, 49, 50, 51, 52, 53, 57, 58]))
+
+    # if expand_dataset:
+    #     dataset = aug_dataset.upsample(
+    #         dataset,
+    #         augmentations=[audio_aug.NoiseAug(1.0), audio_aug.DoubleAug(1.0)],
+    #         combine_aug=False,
+    #         expand_labels=set([2, 3, 4, 6, 7, 14, 15, 16, 18, 20, 32, 35, 45, 49, 50, 51, 52, 53, 57, 58])
+    #     ) # TODO: słownik - która labelka ile procent
+
     if augmentations:
-        audio_augs = [aug for aug in augmentations if isinstance(aug, AudioAug)]
-        dataset = AugmentedDataset.from_dataset(dataset, augs=audio_augs)
+        audio_augs = [aug for aug in augmentations if isinstance(aug, audio_aug.AudioAug)]
+        dataset = aug_dataset.AugmentedDataset.from_dataset(dataset, augs=audio_augs)
 
     # perform shuffle if specified
     if shuffle:
@@ -116,10 +127,101 @@ def preprocess_data_for_training(
     logger.info(f" done extracting features for {dataset_name} dataset")
 
     if augmentations:
-        spec_augs = [aug for aug in augmentations if isinstance(aug, SpectrogramAug)]
-        dataset_encoded = AugmentedDataset.from_dataset(dataset_encoded, augs=spec_augs)
+        spec_augs = [aug for aug in augmentations if isinstance(aug, spec_aug.SpectrogramAug)]
+        dataset_encoded = aug_dataset.AugmentedDataset.from_dataset(dataset_encoded, augs=spec_augs)
+        for aug in augmentations:
+            aug.attach_dataset(dataset_encoded)
 
     return dataset_encoded
+
+
+class MixupLoss(torch.nn.Module):
+    def __init__(self, class_weights):
+        super().__init__()
+        self.loss_fn = torch.nn.BCEWithLogitsLoss(class_weights)
+        # self.loss_fn = torch.nn.CrossEntropyLoss()
+
+    def forward(self, labels, preds):
+        # traceback.print_stack()
+        indices = torch.nonzero(preds)
+        loss = 0
+        for pred in preds:
+            indices = torch.nonzero(pred)
+            total_labels = []
+            alphas = []
+            for index in indices:  # TODO: zająć się większymi rozmiarami batch size'u
+                label = torch.nn.functional.one_hot(index[0], labels.shape[1]).unsqueeze(0).float()
+                label.requires_grad = True
+                total_labels.append(label)
+                alphas.append(pred[index[0]])
+            for label, alpha in zip(total_labels, alphas):
+                loss += alpha * self.loss_fn(pred.unsqueeze(0), label)
+        return loss
+
+
+class WeightedLossTrainer(transformers.Trainer):  # TODO: normalized nie działa bo liczba klas
+
+    def __init__(
+            self,
+            weights: None | str | list = None,
+            num_classes: int | None = None,
+            *args,
+            **kwargs
+        ) -> None:
+
+        """Trainer that handle weighted loss.
+
+        Args:
+            weights (None | "normalized" | list, optional): Set weights to classes.
+                You can manually pass list of weights as this argument
+                or pass None, - then all classes weights will be set to 1,
+                or pass "normalized" - then weights will be calculated to reduce class imbalance.
+                Defaults to None.
+            num_classes (int | None, optional): Number of classes in dataset.
+                If None, all classes that occur in dataset will be counted.
+                Defaults to None.
+        """
+        super().__init__(*args, **kwargs)
+        self._device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if not num_classes:
+            self._num_classes = len(set(self.train_dataset["label"]))
+        else:
+             self._num_classes = num_classes
+        self._classes_weights = self.calculate_weights(weights)
+        # self._loss_fn = torch.nn.BCEWithLogitsLoss(self._classes_weights)
+        self._loss_fn = MixupLoss(self._classes_weights)
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels")
+
+        if len(labels.shape) == 1:
+            labels = torch.nn.functional.one_hot(labels, num_classes=self._num_classes).float()
+
+        outputs = model(**inputs) # currently translate to input_values=inputs["input_values"]
+
+        logits = outputs.logits
+        loss = self._loss_fn(logits, labels)
+        return (loss, outputs) if return_outputs else loss
+
+    def calculate_weights(self, weights) -> list[float]:
+        if isinstance(weights, list):
+            return torch.tensor(weights).to(self._device)
+
+        if weights == None:
+            return torch.tensor([1]*self._num_classes).to(self._device)
+
+        if weights == "normalized":
+            counted_labels = collections.Counter(self.train_dataset["label"])
+            counted_labels = [(k, v) for k, v in counted_labels.items()]
+            counted_labels = sorted(counted_labels, key=lambda x: x[0])
+            total_samples = len(self.train_dataset["label"])
+            total_classes = len(counted_labels)
+            weights = []
+            for _, count in counted_labels:
+                weights.append(total_samples / (total_classes * count))
+            return torch.tensor(weights).to(self._device)
+        raise ValueError("Unsupported weights value")
+
 
 class CustomCallback(transformers.TrainerCallback):
 
@@ -202,11 +304,11 @@ if __name__ == "__main__":
 
     # Use augmentations
     augmentations = [
-        NoiseAug(0.5, noise_ratio=0.01),
-        ShiftAug(0.25, len_percent=0.1, direction='left'),
-        CutoutAug(0.5, freq_masking_percentage=0.15, time_masking_percentage=0.05),
-        # CutoutAug(1.0),
-        # MixupAug(1.0)
+        audio_aug.NoiseAug(0.5, noise_ratio=0.01),
+        audio_aug.ShiftAug(0.25, len_percent=0.1, direction='left'),
+        spec_aug.CutoutAug(0.5, freq_masking_percentage=0.15, time_masking_percentage=0.05),
+        # spec_aug.CutoutAug(1.0),
+        spec_aug.MixupAug(0.25, num_of_classes=66)
     ]
 
     print('#' * 10, augmentations, '#' * 10)
@@ -220,7 +322,8 @@ if __name__ == "__main__":
         dataset_name="train",
         shuffle=True,
         extract_file_name=False,
-        augmentations=augmentations
+        augmentations=augmentations,
+        expand_dataset=True
     )
 
     val_dataset_encoded = preprocess_data_for_training(
@@ -269,16 +372,19 @@ if __name__ == "__main__":
         early_stopping_patience = args.patience)
 
     # Create Trainer instance
-    trainer = transformers.Trainer(
+    # trainer = transformers.Trainer(
+    trainer = WeightedLossTrainer(
         model=model,                                                                 # passing our model
         args=training_args,                                                          # passing the above created arguments
         compute_metrics=compute_metrics,                                             # passing the compute_metrics function that we imported from gdsc_eval module
         train_dataset=train_dataset_encoded,                                         # passing the encoded train set
         eval_dataset=val_dataset_encoded,                                            # passing the encoded val set
         tokenizer=feature_extractor,                                                 # passing the feature extractor
-        callbacks = [early_stopping_callback]                                        # adding early stopping to avoid overfitting
+        callbacks = [early_stopping_callback],                                       # adding early stopping to avoid overfitting
+        num_classes=66,
+        weights=None
     )
-    trainer.add_callback(CustomCallback(trainer))
+    # trainer.add_callback(CustomCallback(trainer))
 
     # Train the model
     logger.info(f" starting training proccess for {args.epochs} epoch(s)")
