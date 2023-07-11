@@ -8,21 +8,24 @@ import datetime
 import json  # to open the json file with labels
 import logging  # module for displaying relevant information in the logs
 import os  # to manage environmental variables
-import pickle
 import sys  # to access to some variables used or maintained by the interpreter
-from typing import Optional  # for type hints
+from typing import Optional, Tuple  # for type hints
 
 import pandas as pd  # home of the DataFrame construct, _the_ most important object for Data Science
 import torch  # library to work with PyTorch tensors and to figure out if we have a GPU available
 import transformers
 from datasets import (  # required tools to create, load and process our audio dataset
     Audio, Dataset, load_dataset)
-from hyperopt import Trials, fmin, hp, tpe
+from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
 
 sys.path.append('..')
+import gc
+
+import numpy as np
+
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
-from preprocessing import preprocess_audio_arrays
+from preprocessing import calculate_stats, preprocess_audio_arrays
 
 
 def get_feature_extractor(model_name: str,
@@ -95,10 +98,21 @@ def preprocess_data_for_training(
         dataset = dataset.add_column("file_name", dataset_paths)
 
     dataset = dataset.cast_column("audio", Audio(sampling_rate=sampling_rate))
+    dataset = dataset.map(lambda x: calculate_stats(
+        x, audio_field='audio',
+        array_field='array',
+        feature_extractor=feature_extractor
+    ), batched=True)
+
+    dataset_mean = np.mean(dataset['mean'])
+    dataset_std = np.mean(dataset['std'])
+
+    feature_extractor = get_feature_extractor(
+        args.model_name, dataset_mean, dataset_std)
 
     logger.info(f" {dataset_name} dataset sampling rate casted to: {sampling_rate}")
 
-    dataset_encoded = dataset.map(
+    dataset_encoded: Dataset = dataset.map(
         lambda x: preprocess_audio_arrays(x, 'audio', 'array', feature_extractor),
         remove_columns="audio",
         batched=True,
@@ -106,8 +120,7 @@ def preprocess_data_for_training(
     )
 
     logger.info(f" done extracting features for {dataset_name} dataset")
-
-    return dataset_encoded
+    return Dataset.from_dict(dataset_encoded[:100])
 
 if __name__ == "__main__":
 
@@ -172,43 +185,44 @@ if __name__ == "__main__":
 
 
     # If mean or std are not passed it will load Featue Extractor with the default settings.
-    feature_extractor = get_feature_extractor(
-        args.model_name, args.train_dataset_mean, args.train_dataset_std)
+    feature_extractor = get_feature_extractor(args.model_name, args.train_dataset_mean, args.train_dataset_std)
+
+    # feature_extractor = transformers.ASTFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-16-16-0.442", do_normalize=False)
 
     # creating train and validation datasets
-    train_dataset_encoded = preprocess_data_for_training(
-        dataset_path=train_path,
-        sampling_rate=args.sampling_rate,
-        feature_extractor=feature_extractor,
-        fe_batch_size=args.fe_batch_size,
-        dataset_name="train",
-        shuffle=True,
-        extract_file_name=False
-    )
+    # train_dataset_encoded = preprocess_data_for_training(
+    #     dataset_path=train_path,
+    #     sampling_rate=args.sampling_rate,
+    #     feature_extractor=feature_extractor,
+    #     fe_batch_size=args.fe_batch_size,
+    #     dataset_name="train",
+    #     shuffle=True,
+    #     extract_file_name=False
+    # )
 
-    val_dataset_encoded = preprocess_data_for_training(
-        dataset_path=val_path,
-        sampling_rate=args.sampling_rate,
-        feature_extractor=feature_extractor,
-        fe_batch_size=args.fe_batch_size,
-        dataset_name="validation"
-    )
-    if args.data_channel != "../../data":
-        test_dataset_encoded = preprocess_data_for_training(
-            dataset_path=test_path,
-            sampling_rate=args.sampling_rate,
-            feature_extractor=feature_extractor,
-            fe_batch_size=args.fe_batch_size,
-            dataset_name="test"
-            )
+    # val_dataset_encoded = preprocess_data_for_training(
+    #     dataset_path=val_path,
+    #     sampling_rate=args.sampling_rate,
+    #     feature_extractor=feature_extractor,
+    #     fe_batch_size=args.fe_batch_size,
+    #     dataset_name="validation"
+    # )
+    # if args.data_channel != "../../data":
+    #     test_dataset_encoded = preprocess_data_for_training(
+    #         dataset_path=test_path,
+    #         sampling_rate=args.sampling_rate,
+    #         feature_extractor=feature_extractor,
+    #         fe_batch_size=args.fe_batch_size,
+    #         dataset_name="test"
+    #         )
 
-    activates = {0: "gelu", 1: "relu", 2: "gelu_new"}
-
-    def objective(
-        hidden_act: hp.choice("hidden_act", ("gelu", "relu", "gelu_new")),
-        hidden_dropout_prob: hp.uniform("hidden_dropout_prob", 0, 0.5),
-        attention_probs_dropout_prob: hp.uniform("attention_probs_dropout_prob", 0, 0.5),
-        initializer_range: hp.uniform("initializer_range", 0.005, 0.1),
+    def objective(  # sampling rate
+        sampling_rate_base: hp.randint('sampling_rate_base', 44 - 16),
+        # sampling_rate_base: hp.choice('sampling_rate_base', (50,)),
+        # hidden_act: hp.choice("hidden_act", ("gelu", "relu", "gelu_new")),
+        # hidden_dropout_prob: hp.uniform("hidden_dropout_prob", 0, 0.5),
+        # attention_probs_dropout_prob: hp.uniform("attention_probs_dropout_prob", 0, 0.5),
+        # initializer_range: hp.uniform("initializer_range", 0.005, 0.1),
     ):
         # Download model from model hub
         model = transformers.ASTForAudioClassification.from_pretrained(
@@ -217,16 +231,45 @@ if __name__ == "__main__":
             label2id=label2id,
             id2label=id2label,
             ignore_mismatched_sizes=True,
-            hidden_act=hidden_act,
-            hidden_dropout_prob=hidden_dropout_prob,
-            attention_probs_dropout_prob=attention_probs_dropout_prob,
-            initializer_range=initializer_range,
+            # hidden_act=hidden_act,
+            # hidden_dropout_prob=hidden_dropout_prob,
+            # attention_probs_dropout_prob=attention_probs_dropout_prob,
+            # initializer_range=initializer_range,
         )
+
+        sampling_rate = (int(sampling_rate_base) + 16) * 1000
+
+        train_dataset_encoded = preprocess_data_for_training(
+            dataset_path=train_path,
+            sampling_rate=sampling_rate,
+            feature_extractor=feature_extractor,
+            fe_batch_size=args.fe_batch_size,
+            dataset_name="train",
+            shuffle=True,
+            extract_file_name=False
+        )
+
+        val_dataset_encoded = preprocess_data_for_training(
+            dataset_path=val_path,
+            sampling_rate=sampling_rate,
+            feature_extractor=feature_extractor,
+            fe_batch_size=args.fe_batch_size,
+            dataset_name="validation"
+        )
+
+        if args.data_channel != "../../data":
+            test_dataset_encoded = preprocess_data_for_training(
+                dataset_path=test_path,
+                sampling_rate=sampling_rate,
+                feature_extractor=feature_extractor,
+                fe_batch_size=args.fe_batch_size,
+                dataset_name="test"
+            )
 
         # Define training arguments for the purpose of training
         training_args = transformers.TrainingArguments(
             output_dir=args.output_dir,                          # directory for saving model checkpoints and logs
-            num_train_epochs=args.epochs,                        # number of epochs
+            num_train_epochs=1, #args.epochs,                        # number of epochs
             per_device_train_batch_size=args.train_batch_size,   # number of examples in batch for training
             per_device_eval_batch_size=args.eval_batch_size,     # number of examples in batch for evaluation
             evaluation_strategy="epoch",                         # makes evaluation at the end of each epoch
@@ -234,9 +277,9 @@ if __name__ == "__main__":
             optim="adamw_torch",                                 # optimizer
             warmup_ratio=0.1,                                    # warm up to allow the optimizer to collect the statistics of gradients
             logging_steps=10,                                    # number of steps for logging the training process - one step is one batch; float denotes ratio of the global training steps
-            load_best_model_at_end = True,                       # whether to load or not the best model at the end of the training
+            # load_best_model_at_end = True,                       # whether to load or not the best model at the end of the training
             metric_for_best_model="eval_f1",                     # claiming that the best model is the one with the lowest loss on the val set
-            save_strategy = 'epoch',                             # saving is done at the end of each epoch
+            save_strategy = 'no', #'epoch',                             # saving is done at the end of each epoch
             disable_tqdm=True                                    # disable printing progress bar to reduce amount of logs
         )
 
@@ -252,7 +295,7 @@ if __name__ == "__main__":
             train_dataset=train_dataset_encoded,                                         # passing the encoded train set
             eval_dataset=val_dataset_encoded,                                            # passing the encoded val set
             tokenizer=feature_extractor,                                                 # passing the feature extractor
-            callbacks = [early_stopping_callback]                                        # adding early stopping to avoid overfitting
+            # callbacks = [early_stopping_callback]                                        # adding early stopping to avoid overfitting
         )
         # trainer.add_callback(CustomCallback(trainer))
 
@@ -262,20 +305,21 @@ if __name__ == "__main__":
 
         # Prepare predictions on the validation set for the purpose of error analysis
         logger.info("training job done. Preparing predictions for validation set.")
+        return {"loss": -trainer.evaluate()['eval_accuracy'], 'status': STATUS_OK}
+        # return 1 - trainer.state.best_metric
 
-        return trainer.state.best_metric
-
-    trials = Trials()
+    # trials = Trials()
 
     best = fmin(
         fn=objective,
         space="annotated",
         algo=tpe.suggest,
-        max_evals=5,
-        trials=trials,
-        trials_save_file = ""  #TODO: uzupełnić albo wywalić?
+        max_evals=6,
+        trials=None, #trials,
+        trials_save_file=""  #TODO: uzupełnić albo wywalić?
     )
-    best["hidden_act"] = activates[best["hidden_act"]]
+    # best["hidden_act"] = activates[best["hidden_act"]]
+    best['sampling_rate_base'] = int(best['sampling_rate_base'])
     logger.info("bayes optimization done :)")
     logger.info(f"Best found parameters are: {best}")
 
@@ -288,11 +332,10 @@ if __name__ == "__main__":
     logger.info(f"Best hyper parameters saved to {best_hparams_path}")
 
 
-    trials_path = os.path.join(args.output_dir, "trials.pkl")
-    with open(trials_path, "wb") as f:
-        pickle.dump(trials, f)
+    # trials_path = os.path.join(args.output_dir, "trials.pkl")
+    # with open(trials_path, "wb") as f:
+    #     pickle.dump(trials, f)
 
-    exit()
 
 
 

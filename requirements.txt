@@ -16,3 +16,4 @@ librosa
 soundfile
 configparser
 pre-commit
+hyperopt
