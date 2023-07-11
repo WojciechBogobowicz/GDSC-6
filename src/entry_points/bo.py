@@ -10,7 +10,6 @@ import logging  # module for displaying relevant information in the logs
 import os  # to manage environmental variables
 import pickle
 import sys  # to access to some variables used or maintained by the interpreter
-from copy import deepcopy
 from typing import Optional  # for type hints
 
 import pandas as pd  # home of the DataFrame construct, _the_ most important object for Data Science
@@ -273,8 +272,8 @@ if __name__ == "__main__":
         space="annotated",
         algo=tpe.suggest,
         max_evals=5,
-        trials=trials
-        trials_save_file: str = ""
+        trials=trials,
+        trials_save_file = ""  #TODO: uzupełnić albo wywalić?
     )
     best["hidden_act"] = activates[best["hidden_act"]]
     logger.info("bayes optimization done :)")
@@ -294,3 +293,47 @@ if __name__ == "__main__":
         pickle.dump(trials, f)
 
     exit()
+
+
+
+# from hyperopt import hp, Trials, fmin, tpe
+# import matplotlib.pyplot as plt
+
+# def model(x, y, z):
+#     return 5*x**2-10*y**4+z**6+10
+
+# def loss_fn(t, p):
+#     return abs(t - p)
+
+
+# def objective(
+#         x: hp.uniform('x', -10, 10),
+#         y: hp.uniform('y', -10, 10),
+#         z: hp.uniform('z', -10, 10)
+#     ):
+#     """Objective function to minimize"""
+#     output = model(x,y,z)
+#     loss = loss_fn(output, -10)
+#     return loss
+
+
+
+# trials = Trials()
+
+# best = fmin(
+#     fn=objective,
+#     space="annotated",
+#     algo=tpe.suggest,
+#     max_evals=2,
+#     trials=trials
+# )
+
+# import pickle
+# with open("test.pkl", "wb") as f:
+#     pickle.dump(trials, f)
+
+# print("Best hyperparameters:", best)
+# print("Best objective value:", min(trials.losses()))
+# plt.plot(list(trials.losses()))
+# print(*[t for t in trials.trials], sep="\n#\n")
+# plt.show()
