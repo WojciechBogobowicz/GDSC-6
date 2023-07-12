@@ -19,14 +19,35 @@ from datasets import (  # required tools to create, load and process our audio d
     Audio, Dataset, load_dataset)
 
 sys.path.append('..')
+import pathlib
+
+import numpy as np
+
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
-from preprocessing import preprocess_audio_arrays
+from gdsc_utils import download_and_extract_model
+from preprocessing import (calculate_stats, cut_spectrograms,
+                           preprocess_audio_arrays)
+
+
+def get_best_checkpoint_path(local_path: str):
+    save_dir = pathlib.Path("../models/sm-training-custom-2023-06-16-12-40-32-865")
+    ckpt_dirs = list(map(str, save_dir.glob("checkpoint*")))
+    ckpt_dirs = sorted(ckpt_dirs, key=lambda x: int(x.split('-')[-1]))
+    last_ckpt = ckpt_dirs[-1]
+    last_ckpt
+    state = TrainerState.load_from_json(last_ckpt + "/trainer_state.json")
+
+    best_checkopot_num = state.best_model_checkpoint.split("-")[-1]
+    best_checkopot_num
+    best_ckpt = last_ckpt.rstrip("1234567890") + best_checkopot_num
+    return best_ckpt
 
 
 def get_feature_extractor(model_name: str,
                           train_dataset_mean: Optional[float] = None,
-                          train_dataset_std: Optional[float] = None
+                          train_dataset_std: Optional[float] = None,
+                          sampling_rate: Optional[int] = None,
     ) -> transformers.ASTFeatureExtractor:
     """
     Retrieves a feature extractor for audio signal processing.
@@ -42,7 +63,7 @@ def get_feature_extractor(model_name: str,
     """
     if all((train_dataset_mean, train_dataset_std)):
         feature_extractor = transformers.ASTFeatureExtractor.from_pretrained(
-            model_name, mean=train_dataset_mean, std=train_dataset_std)
+            model_name, mean=train_dataset_mean, std=train_dataset_std, sampling_rate=sampling_rate)
         logger.info(
             f" feature extractor loaded with dataset mean: {train_dataset_mean} and standard deviation: {train_dataset_std}")
     else:
@@ -59,7 +80,8 @@ def preprocess_data_for_training(
     fe_batch_size: int,
     dataset_name: str,
     shuffle: bool = False,
-    extract_file_name: bool = True) -> Dataset:
+    extract_file_name: bool = True,
+    max_spectrogram_len=None) -> Dataset:
     """
     Preprocesses audio data for training.
 
@@ -105,6 +127,14 @@ def preprocess_data_for_training(
     )
 
     logger.info(f" done extracting features for {dataset_name} dataset")
+    logger.info(f'Cutting spectrograms to given max len: {max_spectrogram_len}')
+
+    if max_spectrogram_len is not None:
+        dataset_encoded = dataset_encoded.map(
+            lambda x: cut_spectrograms(x, max_spectrogram_len),
+            batched=True,
+            batch_size=fe_batch_size
+        )
 
     return dataset_encoded
 
@@ -146,6 +176,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_channel", type=str, default=os.environ.get("SM_CHANNEL_DATA", "local")) # directory where input data from S3 is stored
     parser.add_argument("--output_dir", type=str, default=os.environ.get('SM_MODEL_DIR', "local"))      # output directory. This directory will be saved in the S3 bucket
 
+    parser.add_argument('--remote_model_location', type=str, default=None)
+    parser.add_argument('--model_training_name', type=str, default=None)
+    parser.add_argument('--checkpoint_number', type=int, default=None)
+    parser.add_argument('--max_spectrogram_len', type=int, default=None)
 
     args, _ = parser.parse_known_args()                    # parsing arguments from the notebook
     if args.data_channel == "local":
@@ -182,10 +216,32 @@ if __name__ == "__main__":
 
     num_labels = len(label2id)  # define number of labels
 
+    # Download model from model hub
+    if args.remote_model_location:
+        logger.info(f"Try to load model from:", args.remote_model_location)
+        local_model_dir = download_and_extract_model(model_uri=args.remote_model_location, local_dir='models', is_remote=True)
+        ckpt_path = f'./models/{args.model_training_name}/checkpoint-{args.checkpoint_number}' #get_best_checkpoint_path(local_model_dir)
+        model = transformers.ASTForAudioClassification.from_pretrained(
+            ckpt_path,
+            num_labels=num_labels,
+            label2id=label2id,
+            id2label=id2label,
+            ignore_mismatched_sizes=True
+        )
+        logger.info("Model loaded")
+    else:
+        model = transformers.ASTForAudioClassification.from_pretrained(
+            args.model_name,
+            num_labels=num_labels,
+            label2id=label2id,
+            id2label=id2label,
+            ignore_mismatched_sizes=True
+        )
+
 
     # If mean or std are not passed it will load Featue Extractor with the default settings.
     feature_extractor = get_feature_extractor(
-        args.model_name, args.train_dataset_mean, args.train_dataset_std)
+        args.model_name, args.train_dataset_mean, args.train_dataset_std, sampling_rate=args.sampling_rate)
 
     # creating train and validation datasets
     train_dataset_encoded = preprocess_data_for_training(
@@ -195,7 +251,8 @@ if __name__ == "__main__":
         fe_batch_size=args.fe_batch_size,
         dataset_name="train",
         shuffle=True,
-        extract_file_name=False
+        extract_file_name=False,
+        max_spectrogram_len=args.max_spectrogram_len
     )
 
     val_dataset_encoded = preprocess_data_for_training(
@@ -213,15 +270,6 @@ if __name__ == "__main__":
             fe_batch_size=args.fe_batch_size,
             dataset_name="test"
             )
-
-    # Download model from model hub
-    model = transformers.ASTForAudioClassification.from_pretrained(
-        args.model_name,
-        num_labels=num_labels,
-        label2id=label2id,
-        id2label=id2label,
-        ignore_mismatched_sizes=True
-    )
 
     # Define training arguments for the purpose of training
     training_args = transformers.TrainingArguments(
@@ -257,7 +305,8 @@ if __name__ == "__main__":
 
     # Train the model
     logger.info(f" starting training proccess for {args.epochs} epoch(s)")
-    trainer.train()
+    if args.epochs != 0:
+        trainer.train()
 
     # Prepare predictions on the validation set for the purpose of error analysis
     logger.info("training job done. Preparing predictions for validation set.")
