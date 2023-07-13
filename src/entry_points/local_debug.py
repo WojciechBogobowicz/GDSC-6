@@ -10,8 +10,9 @@ import logging  # module for displaying relevant information in the logs
 import os  # to manage environmental variables
 import sys  # to access to some variables used or maintained by the interpreter
 from copy import deepcopy
-from typing import Optional  # for type hints
+from typing import List, Optional  # for type hints
 
+import numpy as np
 import pandas as pd  # home of the DataFrame construct, _the_ most important object for Data Science
 import torch  # library to work with PyTorch tensors and to figure out if we have a GPU available
 import transformers
@@ -19,10 +20,13 @@ from datasets import (  # required tools to create, load and process our audio d
     Audio, Dataset, load_dataset)
 
 sys.path.append('..')
-import pathlib
 
 import numpy as np
 
+import augmentations.ast_aug as ast_aug
+import augmentations.audio_aug as audio_aug
+import augmentations.dataset as aug_dataset
+import augmentations.spectrogram_aug as spec_aug
 from gdsc_eval import (  # functions to create predictions and evaluate them
     compute_metrics, make_predictions)
 from gdsc_utils import download_and_extract_model
@@ -30,24 +34,12 @@ from preprocessing import (calculate_stats, cut_spectrograms,
                            preprocess_audio_arrays)
 
 
-def get_best_checkpoint_path(local_path: str):
-    save_dir = pathlib.Path("../models/sm-training-custom-2023-06-16-12-40-32-865")
-    ckpt_dirs = list(map(str, save_dir.glob("checkpoint*")))
-    ckpt_dirs = sorted(ckpt_dirs, key=lambda x: int(x.split('-')[-1]))
-    last_ckpt = ckpt_dirs[-1]
-    last_ckpt
-    state = TrainerState.load_from_json(last_ckpt + "/trainer_state.json")
-
-    best_checkopot_num = state.best_model_checkpoint.split("-")[-1]
-    best_checkopot_num
-    best_ckpt = last_ckpt.rstrip("1234567890") + best_checkopot_num
-    return best_ckpt
-
-
 def get_feature_extractor(model_name: str,
                           train_dataset_mean: Optional[float] = None,
                           train_dataset_std: Optional[float] = None,
                           sampling_rate: Optional[int] = None,
+                          max_length: int = 1024,
+                          num_mel_bins: int = 128,
     ) -> transformers.ASTFeatureExtractor:
     """
     Retrieves a feature extractor for audio signal processing.
@@ -63,11 +55,21 @@ def get_feature_extractor(model_name: str,
     """
     if all((train_dataset_mean, train_dataset_std)):
         feature_extractor = transformers.ASTFeatureExtractor.from_pretrained(
-            model_name, mean=train_dataset_mean, std=train_dataset_std, sampling_rate=sampling_rate)
-        logger.info(
-            f" feature extractor loaded with dataset mean: {train_dataset_mean} and standard deviation: {train_dataset_std}")
+            model_name,
+            mean=train_dataset_mean,
+            std=train_dataset_std,
+            sampling_rate=sampling_rate,
+            max_length=max_length,
+            num_mel_bins=num_mel_bins,
+        )
+        logger.info(f" feature extractor loaded with dataset mean: {train_dataset_mean} and standard deviation: {train_dataset_std}")
     else:
-        feature_extractor = transformers.ASTFeatureExtractor.from_pretrained(model_name)
+        feature_extractor = transformers.ASTFeatureExtractor.from_pretrained(
+            model_name,
+            sampling_rate=sampling_rate,
+            max_length=max_length,
+            num_mel_bins=num_mel_bins
+        )
         logger.info(" at least one of the optional arguments (mean, std) is missing")
         logger.info(f" feature extractor loaded with default dataset mean: {feature_extractor.mean} and standard deviation: {feature_extractor.std}")
 
@@ -81,6 +83,8 @@ def preprocess_data_for_training(
     dataset_name: str,
     shuffle: bool = False,
     extract_file_name: bool = True,
+    augmentations: Optional[List[ast_aug.AstAug]] = None,
+    expand_dataset: bool = False,
     max_spectrogram_len=None) -> Dataset:
     """
     Preprocesses audio data for training.
@@ -99,6 +103,13 @@ def preprocess_data_for_training(
 
     """
     dataset = load_dataset("audiofolder", data_dir=dataset_path).get('train') # loading the dataset
+
+    # if expand_dataset:
+    #    dataset = aug_dataset.upsample(dataset, threshold=15)
+
+    if augmentations:
+        audio_augs = [aug for aug in augmentations if isinstance(aug, audio_aug.AudioAug)]
+        dataset = aug_dataset.AugmentedDataset.from_dataset(dataset, augs=audio_augs)
 
     # perform shuffle if specified
     if shuffle:
@@ -128,6 +139,13 @@ def preprocess_data_for_training(
 
     logger.info(f" done extracting features for {dataset_name} dataset")
     logger.info(f'Cutting spectrograms to given max len: {max_spectrogram_len}')
+
+    if augmentations:
+        spec_augs = [aug for aug in augmentations if isinstance(aug, spec_aug.SpectrogramAug)]
+        dataset_encoded = aug_dataset.AugmentedDataset.from_dataset(dataset_encoded, augs=spec_augs)
+        # dataset_encoded = aug_dataset.AugmentedDataset.from_iter(iter(dataset_encoded), augs=spec_augs)
+        for aug in augmentations:
+            aug.attach_dataset(dataset_encoded)
 
     if max_spectrogram_len is not None:
         dataset_encoded = dataset_encoded.map(
@@ -180,6 +198,10 @@ if __name__ == "__main__":
     parser.add_argument('--model_training_name', type=str, default=None)
     parser.add_argument('--checkpoint_number', type=int, default=None)
     parser.add_argument('--max_spectrogram_len', type=int, default=None)
+    parser.add_argument('--num_mel_bins', type=int, default=128)
+    parser.add_argument('--max_length', type=int, default=1024)
+    parser.add_argument('--hidden_dropout_prob', type=float, default=0.1)
+    parser.add_argument('--warmup_ratio', type=float, default=0.1)
 
     args, _ = parser.parse_known_args()                    # parsing arguments from the notebook
     if args.data_channel == "local":
@@ -220,13 +242,16 @@ if __name__ == "__main__":
     if args.remote_model_location:
         logger.info(f"Try to load model from:", args.remote_model_location)
         local_model_dir = download_and_extract_model(model_uri=args.remote_model_location, local_dir='models', is_remote=True)
-        ckpt_path = f'./models/{args.model_training_name}/checkpoint-{args.checkpoint_number}' #get_best_checkpoint_path(local_model_dir)
+        ckpt_path = f'./models/{args.model_training_name}/checkpoint-{args.checkpoint_number}'
         model = transformers.ASTForAudioClassification.from_pretrained(
             ckpt_path,
             num_labels=num_labels,
             label2id=label2id,
             id2label=id2label,
-            ignore_mismatched_sizes=True
+            ignore_mismatched_sizes=True,
+            max_length=args.max_length,
+            num_mel_bins=args.num_mel_bins,
+            hidden_dropout_prob=args.hidden_dropout_prob
         )
         logger.info("Model loaded")
     else:
@@ -235,13 +260,33 @@ if __name__ == "__main__":
             num_labels=num_labels,
             label2id=label2id,
             id2label=id2label,
-            ignore_mismatched_sizes=True
+            ignore_mismatched_sizes=True,
+            max_length=args.max_length,
+            num_mel_bins=args.num_mel_bins,
+            hidden_dropout_prob=args.hidden_dropout_prob
         )
 
 
     # If mean or std are not passed it will load Featue Extractor with the default settings.
     feature_extractor = get_feature_extractor(
-        args.model_name, args.train_dataset_mean, args.train_dataset_std, sampling_rate=args.sampling_rate)
+        args.model_name,
+        args.train_dataset_mean,
+        args.train_dataset_std,
+        sampling_rate=args.sampling_rate,
+        num_mel_bins=args.num_mel_bins,
+        max_length=args.max_length,
+    )
+
+    # Use augmentations
+    augmentations = [
+        # audio_aug.NoiseAug(0.5, noise_ratio=0.01),
+        # audio_aug.ShiftAug(0.25, len_percent=0.1, direction='left'),
+        # spec_aug.CutoutAug(0.5, freq_masking_percentage=0.15, time_masking_percentage=0.05),
+        # spec_aug.CutoutAug(1.0),
+        # spec_aug.MixupAug(0.25, num_of_classes=66)
+    ]
+
+    print('#' * 10, augmentations, '#' * 10)
 
     # creating train and validation datasets
     train_dataset_encoded = preprocess_data_for_training(
@@ -252,6 +297,8 @@ if __name__ == "__main__":
         dataset_name="train",
         shuffle=True,
         extract_file_name=False,
+        augmentations=augmentations,
+        expand_dataset=True,
         max_spectrogram_len=args.max_spectrogram_len
     )
 
@@ -280,7 +327,7 @@ if __name__ == "__main__":
         evaluation_strategy="epoch",                         # makes evaluation at the end of each epoch
         learning_rate=args.learning_rate,                    # learning rate
         optim="adamw_torch",                                 # optimizer
-        # warmup_ratio=0.1,                                  # warm up to allow the optimizer to collect the statistics of gradients
+        warmup_ratio=args.warmup_ratio,                                  # warm up to allow the optimizer to collect the statistics of gradients
         logging_steps=10,                                    # number of steps for logging the training process - one step is one batch; float denotes ratio of the global training steps
         load_best_model_at_end = True,                       # whether to load or not the best model at the end of the training
         metric_for_best_model="eval_loss",                   # claiming that the best model is the one with the lowest loss on the val set

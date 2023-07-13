@@ -64,6 +64,4 @@ def cut_spectrograms(examples: Dict[str, Any], max_len: int):
     arr = np.array(examples['input_values'])
     ret = arr[:, :max_len, :]
     examples['input_values'] = ret
-    # print('Yo mama so fat!', ret.shape)
-    # exit()
     return examples
