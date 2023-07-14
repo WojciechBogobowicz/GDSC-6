@@ -17,7 +17,7 @@ import pandas as pd  # home of the DataFrame construct, _the_ most important obj
 import torch  # library to work with PyTorch tensors and to figure out if we have a GPU available
 import transformers
 from datasets import (  # required tools to create, load and process our audio dataset
-    Audio, Dataset, load_dataset)
+    Audio, Dataset, concatenate_datasets, load_dataset)
 
 sys.path.append('..')
 
@@ -202,6 +202,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_length', type=int, default=1024)
     parser.add_argument('--hidden_dropout_prob', type=float, default=0.1)
     parser.add_argument('--warmup_ratio', type=float, default=0.1)
+    parser.add_argument('--concat_datasets', type=str, default='N')
 
     args, _ = parser.parse_known_args()                    # parsing arguments from the notebook
     if args.data_channel == "local":
@@ -317,6 +318,11 @@ if __name__ == "__main__":
             fe_batch_size=args.fe_batch_size,
             dataset_name="test"
             )
+
+    if args.concat_datasets.upper() == 'Y':
+        train_dataset_encoded = concatenate_datasets([train_dataset_encoded, val_dataset_encoded])
+        val_dataset_encoded = val_dataset_encoded.select([0])
+        logger.info(f"Dataset train and val concatenated. The new train length is: {len(train_dataset_encoded)} and val length is: {len(val_dataset_encoded)}")
 
     # Define training arguments for the purpose of training
     training_args = transformers.TrainingArguments(
